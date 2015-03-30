@@ -17,51 +17,84 @@
  * nodeConfig.addTech(require('enb-stylus/techs/css-stylus'));
  * ```
  */
-var path = require('path'),
+var fs = require('fs'),
     vow = require('vow'),
     postcss = require('postcss'),
+    atUrl = require('postcss-url'),
     atImport = require('postcss-import'),
     stylus = require('stylus');
 
-module.exports = require('enb/lib/build-flow').create()
+module.exports = require('enb/techs/css').buildFlow()
     .name('css-stylus')
     .target('target', '?.css')
-    .defineOption('compress', false)
-    .defineOption('prefix', '')
     .defineOption('variables')
+    .defineOption('includes')
+    .defineOption('compress', false)
+    .defineOption('comments', true)
+    .defineOption('prefix', '')
+    .defineOption('hoist', false)
+    .defineOption('include', true)
+    .defineOption('inline', false)
+    .defineOption('resolve', true)
     .useFileList(['css', 'styl'])
     .builder(function (sourceFiles) {
         var node = this.node,
-            filename = node.resolvePath(path.basename(this._target)),
+            filename = node.resolvePath(this._target),
+            variables = this._variables,
+            includes = this._includes,
+            opts = {
+                comments: this._comments,
+                compress: this._compress,
+                prefix: this._prefix,
+                hoist: this._hoist,
+                inline: this._inline,
+                include: this._include,
+                resolve: this._resolve
+            },
             defer = vow.defer(),
             css, renderer;
 
-        css = sourceFiles.map(function (file) {
-            var url = node.relativePath(file.fullname);
+        css = sourceFiles.length === 1 ?
+            fs.readFileSync(sourceFiles[0].fullname, 'utf-8') :
+            sourceFiles.map(function (file) {
+                var url = node.relativePath(file.fullname);
 
-            if (file.name.indexOf('.styl') !== -1) {
-                return '/* ' + url + ':begin */\n' +
-                    '@import "' + url + '";\n' +
-                    '/* ' + url + ':end */\n';
-            } else {
-                return '@import "' + url + '";';
-            }
-        }).join('\n');
+                if (file.name.indexOf('.styl') !== -1 && opts.comments) {
+                    return '/* ' + url + ':begin */\n' +
+                        '@import "' + url + '";\n' +
+                        '/* ' + url + ':end */\n';
+                } else {
+                    return '@import "' + url + '";';
+                }
+            }).join('\n');
 
         renderer = stylus(css, {
-                compress: this._compress,
-                prefix: this._prefix
+                compress: opts.compress,
+                prefix: opts.prefix
             })
-            .set('resolve url', true)
-            .set('filename', filename)
-            .define('url', stylus.resolver());
+            .set('hoist atrules', opts.hoist)
+            .set('filename', filename);
 
-        if (this._variables) {
-            var variables = this._variables;
-
+        if (variables) {
             Object.keys(variables).forEach(function (key) {
                 renderer.define(key, variables[key]);
             });
+        }
+
+        if (includes) {
+            includes.forEach(function (val) {
+                renderer.include(val);
+            });
+        }
+
+        if (opts.inline) {
+            renderer.define('url', stylus.url());
+        }
+
+        if (opts.resolve || opts.include) {
+            renderer
+                .set('resolve url', true)
+                .define('url', stylus.resolver());
         }
 
         this._configureRenderer(renderer)
@@ -75,21 +108,28 @@ module.exports = require('enb/lib/build-flow').create()
 
         return defer.promise()
             .then(function (css) {
-                return postcss()
-                    .use(atImport({
-                        transform: function (content, filename) {
-                            var url = node.relativePath(filename),
-                                pre = '/* ' + url + ': begin */ /**/\n',
-                                post = '/* ' + url + ': end */ /**/\n',
-                                res = pre + content + post;
+                if (opts.include) {
+                    return postcss()
+                        .use(atImport({
+                            transform: opts.comments && function (content, filename) {
+                                var url = node.relativePath(filename),
+                                    pre = '/* ' + url + ': begin */ /**/\n',
+                                    post = '/* ' + url + ': end */ /**/\n',
+                                    res = pre + content + post;
 
-                            return res.replace(/\n/g, '\n    ');
-                        }
-                    }))
-                    .process(css, {
-                        from: filename
-                    })
-                    .css;
+                                return res.replace(/\n/g, '\n    ');
+                            }
+                        }))
+                        .use(atUrl({
+                            url: opts.inline ? 'inline' : 'rebase'
+                        }))
+                        .process(css, {
+                            from: filename
+                        })
+                        .css;
+                }
+
+                return css;
             });
     })
     .methods({
